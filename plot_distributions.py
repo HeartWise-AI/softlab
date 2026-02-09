@@ -55,7 +55,7 @@ print("  Saved coverage_heatmap.png", flush=True)
 KEY_LABS = {
     "Creatinine (serum)":  {"unit": "umol/L",    "xlim": (0, 500),     "category": "Creatinine"},
     "Creatinine":          {"unit": "umol/L",     "xlim": (0, 500),     "category": "Creatinine"},
-    "eGFR (CKD-EPI)":     {"unit": "mL/min/1.73m2", "xlim": (0, 150), "category": "Creatinine"},
+    "eGFR (MDRD)":         {"unit": "mL/min/1.73m2", "xlim": (0, 150), "category": "Creatinine"},
     "Hemoglobin":          {"unit": "g/L",        "xlim": (30, 220),    "category": "CBC"},
     "WBC (absolute)":      {"unit": "10*9/L",     "xlim": (0, 40),      "category": "CBC"},
     "Platelets":           {"unit": "10*9/L",     "xlim": (0, 600),     "category": "CBC"},
@@ -68,7 +68,6 @@ KEY_LABS = {
     "Sodium":              {"unit": "mmol/L",     "xlim": (110, 160),   "category": "Electrolytes"},
     "Potassium":           {"unit": "mmol/L",     "xlim": (2, 7),       "category": "Electrolytes"},
     "Chloride":            {"unit": "mmol/L",     "xlim": (80, 130),    "category": "Electrolytes"},
-    "BNP":                 {"unit": "pg/mL",      "xlim": (0, 2000),    "category": "BNP"},
     "NT-proBNP":           {"unit": "pg/mL",      "xlim": (0, 5000),    "category": "BNP"},
 }
 
