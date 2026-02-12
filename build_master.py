@@ -3,24 +3,47 @@
 Build a harmonized master parquet from Softlab & SILP Excel extractions.
 Lab results: creatinine, CBC, troponin, BNP, electrolytes (2015-2025).
 Uses calamine engine for fast xlsx reading.
+
+Key fixes vs original:
+- Split lab-code mapping by source (SOFTLAB vs SILP) to avoid code collisions.
+- Explicitly handles the following collisions :
+    HB1:
+      Softlab = Hémoglobine
+      SILP    = HLA-B1 (SSP)
+    HYPO2:
+      Softlab = Hypochromie
+      SILP    = Test de tolérance au glucose 2h suivi FKP
+    CL2:
+      Softlab = Chlorure
+      SILP    = Clairance de la créatinine; 2 h
+- Keeps unmapped codes as UNMAPPED (QC-friendly).
+- Robust numeric parsing + robust datetime parsing (Excel serial fallback).
 """
 
-import sys, warnings, gc, time
+import warnings, gc, time
 warnings.filterwarnings("ignore", category=UserWarning)
 
 import pandas as pd
 import numpy as np
 from pathlib import Path
 
-# Force unbuffered output
-def log(msg):
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Config
+# ──────────────────────────────────────────────────────────────────────────────
+
+def log(msg: str) -> None:
     print(msg, flush=True)
 
 SRC = Path("/media//data1/datasets/softlab")
 OUT = Path("/volume/softlab")
 OUT.mkdir(exist_ok=True)
 
-# ── Column schema ──────────────────────────────────────────────────────────
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Column schemas
+# ──────────────────────────────────────────────────────────────────────────────
+
 SOFTLAB_COLS = [
     "last_name", "first_name", "order_id", "patient_id",
     "test_dt", "verified_dt",
@@ -36,11 +59,18 @@ SILP_COLS = [
 FINAL_COLS = [
     "patient_id", "order_id", "test_dt", "verified_dt",
     "group_test_id", "test_id", "result_raw", "result_numeric",
-    "units", "status", "state", "lab_category", "lab_name", "source_file"
+    "units", "status", "state",
+    "lab_category", "lab_name",
+    "unmapped_flag",
+    "source_file"
 ]
 
-# ── Lab mapping: (group_test_id, test_id) -> (category, human_name) ───────
-LAB_MAP = {
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Lab mappings (source-specific!)
+# ──────────────────────────────────────────────────────────────────────────────
+
+LAB_MAP_SOFTLAB = {
     # --- Creatinine ---
     ("CREA", "CREAS"):  ("Creatinine", "Creatinine (serum)"),
     ("CREA", "CREI2"):  ("Creatinine", "Creatinine"),
@@ -58,7 +88,7 @@ LAB_MAP = {
     # --- Electrolytes ---
     ("NAKCL", "NA2"):   ("Electrolytes", "Sodium"),
     ("NAKCL", "K2"):    ("Electrolytes", "Potassium"),
-    ("NAKCL", "CL2"):   ("Electrolytes", "Chloride"),
+    ("NAKCL", "CL2"):   ("Electrolytes", "Chloride"),     # Softlab meaning
     ("NAKCL", "ASP1"):  ("Electrolytes", "Specimen appearance"),
     ("ELEC",  "NA1"):   ("Electrolytes", "Sodium"),
     ("ELEC",  "K1"):    ("Electrolytes", "Potassium"),
@@ -70,7 +100,7 @@ LAB_MAP = {
     ("FSC", "LEU1"):    ("CBC", "WBC"),
     ("FSC", "ERY1"):    ("CBC", "RBC"),
     ("FSC", "HB"):      ("CBC", "Hemoglobin"),
-    ("FSC", "HB1"):     ("CBC", "Hemoglobin"),
+    ("FSC", "HB1"):     ("CBC", "Hemoglobin"),            # Softlab meaning 
     ("FSC", "HT"):      ("CBC", "Hematocrit"),
     ("FSC", "HT1"):     ("CBC", "Hematocrit"),
     ("FSC", "PLA1"):    ("CBC", "Platelets"),
@@ -144,6 +174,7 @@ LAB_MAP = {
     ("FSC", "ANOH1"):   ("CBC", "Abnormal Hemoglobin"),
     ("FSC", "ANOR1"):   ("CBC", "Abnormal Reticulocyte Profile"),
     ("FSC", "DIMR"):    ("CBC", "Dimorphic RBC"),
+    # HYPO2: Softlab = Hypochromie
     ("FSC", "HYPO2"):   ("CBC", "Hypochromia"),
     ("FSC", "MACR2"):   ("CBC", "Macrocytosis"),
     ("FSC", "MICR2"):   ("CBC", "Microcytosis"),
@@ -166,37 +197,107 @@ LAB_MAP = {
     ("FSC", "VR1"):     ("CBC", "Flag VR1"),
 }
 
+LAB_MAP_SILP = {
+    # Electrolytes (prefer CHLO for chloride; CL2 is creatinine clearance here)
+    ("ELEC", "NA1"):   ("Electrolytes", "Sodium"),
+    ("ELEC", "K1"):    ("Electrolytes", "Potassium"),
+    ("ELEC", "CHLO"):  ("Electrolytes", "Chloride"),
 
-def parse_numeric_vec(series):
-    """Vectorized French-number parsing."""
+    ("NAKCL", "NA2"):  ("Electrolytes", "Sodium"),
+    ("NAKCL", "K2"):   ("Electrolytes", "Potassium (2nd sample)"),
+    ("NAKCL", "CL2"):  ("Creatinine", "Creatinine clearance (2h)"),  # SILP meaning 
+
+    # Troponin / BNP
+    ("TTROP", "TROT"): ("Troponin", "Troponin T"),
+    ("BNP",  "BNP2"):  ("BNP", "NT-proBNP"),
+    ("NBNP", "NBNP"):  ("BNP", "NT-proBNP"),
+
+    # Creatinine group
+    ("CREA", "CREAS"): ("Creatinine", "Creatinine (serum)"),
+    ("CREA", "CREI2"): ("Creatinine", "Creatinine"),
+    ("CREA", "DFGE4"): ("Creatinine", "eGFR (MDRD)"),
+    ("CREA", "DFGE5"): ("Creatinine", "eGFR (MDRD)"),
+    ("CREA", "ASP1"):  ("Creatinine", "Specimen appearance"),
+
+    # Collisions you confirmed
+    ("FSC", "HB"):     ("CBC", "Hemoglobin"),
+    ("FSC", "HB1"):    ("Immunology", "HLA-B1 (SSP)"),         # SILP meaning 
+    ("FSC", "HYPO2"):  ("Glucose", "GTT 2h (suivi FKP)"),       # SILP meaning 
+
+
+
+def build_map_df(lab_map: dict) -> pd.DataFrame:
+    return pd.DataFrame(
+        [{"group_test_id": k[0], "test_id": k[1], "lab_category": v[0], "lab_name": v[1]}
+         for k, v in lab_map.items()]
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Parsing helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def parse_numeric_vec(series: pd.Series) -> pd.Series:
+    """
+    Vectorized parsing of numeric lab values in French formats:
+    - handles commas as decimals
+    - strips '<' '>' prefixes
+    - extracts first numeric token from strings like "12,3 mg/L"
+    """
     s = series.astype(str).str.strip()
-    # Mark non-numeric
-    bad = s.isin([".", "-", "", "----", "N/A", "NA", "Normal", "See comment", "nan", "None", "none"])
-    # Strip < > prefixes
-    s = s.str.lstrip("<>").str.strip()
-    # French decimal -> dot
+    s_lower = s.str.lower()
+
+    bad = s_lower.isin([".", "-", "", "----", "n/a", "na", "normal", "see comment", "nan", "none"])
+
+    s = s.str.replace(r"^[<>]\s*", "", regex=True)
+    s = s.str.extract(r"([-+]?\d+(?:[.,]\d+)?)", expand=False)
     s = s.str.replace(",", ".", regex=False)
-    result = pd.to_numeric(s, errors="coerce")
-    result[bad] = np.nan
-    return result
+
+    out = pd.to_numeric(s, errors="coerce")
+    out[bad] = np.nan
+    return out
 
 
-def read_file_calamine(filepath, source_tag, is_silp=False):
+def parse_dt(series: pd.Series) -> pd.Series:
+    """
+    Robust datetime parsing:
+    1) standard to_datetime
+    2) if many NaT and series looks numeric, try Excel serial dates.
+    """
+    dt = pd.to_datetime(series, errors="coerce")
+
+    if dt.isna().mean() > 0.5:
+        num = pd.to_numeric(series, errors="coerce")
+        dt2 = pd.to_datetime(num, unit="D", origin="1899-12-30", errors="coerce")
+        dt = dt.fillna(dt2)
+
+    return dt
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# IO
+# ──────────────────────────────────────────────────────────────────────────────
+
+def read_file_calamine(filepath: Path, source_tag: str, is_silp: bool = False) -> pd.DataFrame:
     """Read all data sheets from an xlsx using calamine engine."""
     log(f"  Reading {filepath.name} ...")
     t0 = time.time()
+
     sheets_dict = pd.read_excel(filepath, sheet_name=None, header=None, engine="calamine")
-    t1 = time.time()
-    log(f"    Excel parse: {t1-t0:.0f}s")
+    log(f"    Excel parse: {time.time()-t0:.0f}s")
 
     chunks = []
     for sn, df in sheets_dict.items():
-        if sn == "SQL":
+        if str(sn).strip().upper() == "SQL":
             continue
-        # Convert first column to string to filter
-        df[0] = df[0].astype(str)
-        # Drop header rows and empty/nan rows
-        df = df[~df[0].isin(["LAST_NAME", "nan", "None", ""])]
+        if df.shape[1] == 0:
+            continue
+
+        # Filter header-ish rows by first column text
+        df0 = df[0].astype(str).str.strip().str.upper()
+        df = df[~df0.isin(["LAST_NAME", "NAN", "NONE", ""])]
+
+        # Drop fully empty rows
         df = df.dropna(subset=[0], how="all")
         if len(df) == 0:
             continue
@@ -221,51 +322,67 @@ def read_file_calamine(filepath, source_tag, is_silp=False):
     gc.collect()
 
     if not chunks:
-        cols = SOFTLAB_COLS + ["source_file"]
-        return pd.DataFrame(columns=cols)
+        base_cols = SILP_COLS if is_silp else SOFTLAB_COLS
+        return pd.DataFrame(columns=base_cols + ["source_file"])
 
-    result = pd.concat(chunks, ignore_index=True)
+    out = pd.concat(chunks, ignore_index=True)
     del chunks
     gc.collect()
-    log(f"    TOTAL: {len(result):,} rows ({time.time()-t0:.0f}s)")
-    return result
+
+    log(f"    TOTAL: {len(out):,} rows ({time.time()-t0:.0f}s)")
+    return out
 
 
-def harmonize(df):
-    """Apply lab mapping, parse numerics, produce final schema."""
-    # Ensure string types for group/test id
+# ──────────────────────────────────────────────────────────────────────────────
+# Harmonization
+# ──────────────────────────────────────────────────────────────────────────────
+
+def harmonize(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply source-specific lab mapping, parse numerics, produce final schema."""
     df["group_test_id"] = df["group_test_id"].astype(str).str.strip()
     df["test_id"] = df["test_id"].astype(str).str.strip()
 
-    # Vectorized lab mapping via merge
-    map_df = pd.DataFrame([
-        {"group_test_id": k[0], "test_id": k[1], "lab_category": v[0], "lab_name": v[1]}
-        for k, v in LAB_MAP.items()
-    ])
-    df = df.merge(map_df, on=["group_test_id", "test_id"], how="left")
+    # Decide source by tag
+    is_silp = df["source_file"].astype(str).str.contains("silp", case=False, na=False)
 
-    # Tag unmapped tests with their group/test id
-    unmapped = df["lab_category"].isna()
-    df.loc[unmapped, "lab_category"] = df.loc[unmapped, "group_test_id"]
-    df.loc[unmapped, "lab_name"] = df.loc[unmapped, "test_id"]
+    map_soft = build_map_df(LAB_MAP_SOFTLAB)
+    map_silp = build_map_df(LAB_MAP_SILP)
 
-    # Parse result
+    df_soft = df.loc[~is_silp].merge(map_soft, on=["group_test_id", "test_id"], how="left")
+    df_silp = df.loc[is_silp].merge(map_silp, on=["group_test_id", "test_id"], how="left")
+    df = pd.concat([df_soft, df_silp], ignore_index=True)
+
+    # Unmapped handling (QC-friendly)
+    df["unmapped_flag"] = df["lab_category"].isna()
+    df.loc[df["unmapped_flag"], "lab_category"] = "UNMAPPED"
+    df.loc[df["unmapped_flag"], "lab_name"] = (
+        df.loc[df["unmapped_flag"], "group_test_id"] + "::" + df.loc[df["unmapped_flag"], "test_id"]
+    )
+
+    # Results
     df["result_raw"] = df["result"].astype(str)
     df["result_numeric"] = parse_numeric_vec(df["result"])
 
-    # Parse dates
-    df["test_dt"] = pd.to_datetime(df["test_dt"], errors="coerce")
-    df["verified_dt"] = pd.to_datetime(df["verified_dt"], errors="coerce")
+    # Dates
+    df["test_dt"] = parse_dt(df["test_dt"])
+    df["verified_dt"] = parse_dt(df["verified_dt"])
 
-    # Clean IDs
+    # IDs
     df["patient_id"] = df["patient_id"].astype(str).str.strip()
     df["order_id"] = df["order_id"].astype(str).str.strip()
 
-    df = df[FINAL_COLS].copy()
-    return df
+    # Light normalization
+    df["units"] = df["units"].astype(str).str.strip()
+    df["status"] = df["status"].astype(str).str.strip()
+    df["state"] = df["state"].astype(str).str.strip()
+
+    return df[FINAL_COLS].copy()
 
 
-# ── MAIN ───────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ──────────────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     log("=" * 60)
     log("Building master parquet from Softlab/SILP extractions")
@@ -281,6 +398,7 @@ if __name__ == "__main__":
         (SRC / "Softlab extraction 21-23.xlsx", "softlab_21-23"),
         (SRC / "Softlab extraction 24-25.xlsx", "softlab_24-25"),
     ]
+
     for fpath, tag in softlab_files:
         df = read_file_calamine(fpath, tag, is_silp=False)
         log(f"  Harmonizing {tag} ...")
@@ -310,10 +428,17 @@ if __name__ == "__main__":
     log(f"Master dataset: {len(master):,} rows")
     log(f"Date range: {master['test_dt'].min()} -> {master['test_dt'].max()}")
     log(f"Unique patients: {master['patient_id'].nunique():,}")
-    log(f"\nLab categories:")
-    log(master["lab_category"].value_counts().to_string())
-    log(f"\nNumeric result coverage: {master['result_numeric'].notna().sum():,} / {len(master):,} "
-        f"({100*master['result_numeric'].notna().mean():.1f}%)")
+
+    log("\nLab categories (top 30):")
+    log(master["lab_category"].value_counts().head(30).to_string())
+
+    log("\nUnmapped codes (top 30):")
+    log(master.loc[master["unmapped_flag"], "lab_name"].value_counts().head(30).to_string())
+
+    log(
+        f"\nNumeric result coverage: {master['result_numeric'].notna().sum():,} / {len(master):,} "
+        f"({100*master['result_numeric'].notna().mean():.1f}%)"
+    )
 
     # Save parquet
     out_path = OUT / "softlab_master.parquet"
