@@ -50,6 +50,7 @@ LAB_MAP = {
 
     # --- Troponin ---
     ("TTROP", "TROT"):  ("Troponin", "Troponin T"),
+    ("TNT",   "TNTH2"): ("Troponin", "Troponin T (hs)"),
 
     # --- BNP ---
     ("BNP",  "BNP2"):   ("BNP", "NT-proBNP"),
@@ -281,6 +282,11 @@ if __name__ == "__main__":
         (SRC / "Softlab extraction 21-23.xlsx", "softlab_21-23"),
         (SRC / "Softlab extraction 24-25.xlsx", "softlab_24-25"),
     ]
+    # Find troponin file (handles unicode in filename)
+    import glob as globmod
+    trop_files = globmod.glob(str(SRC / "*ropon*TNT*.xlsx"))
+    for tf in trop_files:
+        softlab_files.append((Path(tf), "troponin_tnt_15-25"))
     for fpath, tag in softlab_files:
         df = read_file_calamine(fpath, tag, is_silp=False)
         log(f"  Harmonizing {tag} ...")

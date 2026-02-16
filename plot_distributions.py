@@ -65,6 +65,7 @@ KEY_LABS = {
     "Neutrophils (abs)":   {"unit": "10*9/L",     "xlim": (0, 30),      "category": "CBC"},
     "Lymphocytes (abs)":   {"unit": "10*9/L",     "xlim": (0, 10),      "category": "CBC"},
     "Troponin T":          {"unit": "ng/L",       "xlim": (0, 500),     "category": "Troponin"},
+    "Troponin T (hs)":     {"unit": "ng/L",       "xlim": (0, 500),     "category": "Troponin"},
     "Sodium":              {"unit": "mmol/L",     "xlim": (110, 160),   "category": "Electrolytes"},
     "Potassium":           {"unit": "mmol/L",     "xlim": (2, 7),       "category": "Electrolytes"},
     "Chloride":            {"unit": "mmol/L",     "xlim": (80, 130),    "category": "Electrolytes"},
